@@ -24,25 +24,19 @@ from __future__ import annotations
 
 from typing import Optional
 
+from labels import (
+    ATTRIBUTION_AI,
+    ATTRIBUTION_HUMAN,
+    ATTRIBUTION_UNCERTAIN,
+    LABEL_AI,
+    LABEL_HUMAN,
+    LABEL_UNCERTAIN,
+    label_for_attribution,
+)
+
 _AI_THRESHOLD = 0.7
 _HUMAN_THRESHOLD = 0.3
 _DIRECTION_MIDPOINT = 0.5
-
-_LABEL_AI = "high-confidence AI"
-_LABEL_HUMAN = "high-confidence human"
-_LABEL_UNCERTAIN = "uncertain"
-
-_ATTRIBUTION_AI = "AI"
-_ATTRIBUTION_HUMAN = "human"
-_ATTRIBUTION_UNCERTAIN = "uncertain"
-
-
-def _attribution_for(label: str) -> str:
-    if label == _LABEL_AI:
-        return _ATTRIBUTION_AI
-    if label == _LABEL_HUMAN:
-        return _ATTRIBUTION_HUMAN
-    return _ATTRIBUTION_UNCERTAIN
 
 
 def combine(stylo_score: float, llm_ai_score: Optional[float]) -> dict:
@@ -52,8 +46,8 @@ def combine(stylo_score: float, llm_ai_score: Optional[float]) -> dict:
         return {
             "combined_score": stylo_score,
             "signals_agreed": False,
-            "final_label":    _LABEL_UNCERTAIN,
-            "attribution":    _ATTRIBUTION_UNCERTAIN,
+            "final_label":    LABEL_UNCERTAIN,
+            "attribution":    ATTRIBUTION_UNCERTAIN,
         }
 
     combined_score = (stylo_score + llm_ai_score) / 2.0
@@ -65,18 +59,18 @@ def combine(stylo_score: float, llm_ai_score: Optional[float]) -> dict:
     strong_human = combined_score < _HUMAN_THRESHOLD and both_lean_human
 
     if strong_ai:
-        final_label = _LABEL_AI
+        attribution = ATTRIBUTION_AI
         signals_agreed = True
     elif strong_human:
-        final_label = _LABEL_HUMAN
+        attribution = ATTRIBUTION_HUMAN
         signals_agreed = True
     else:
-        final_label = _LABEL_UNCERTAIN
+        attribution = ATTRIBUTION_UNCERTAIN
         signals_agreed = False
 
     return {
         "combined_score": combined_score,
         "signals_agreed": signals_agreed,
-        "final_label":    final_label,
-        "attribution":    _attribution_for(final_label),
+        "final_label":    label_for_attribution(attribution),
+        "attribution":    attribution,
     }

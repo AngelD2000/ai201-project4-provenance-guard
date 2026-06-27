@@ -2,7 +2,7 @@
 
 M3: `decisions` table with stylometric fields.
 M4: adds llm_* / combined_score / signals_agreed / final_label / attribution.
-M5 (future): will create `appeals` and `appeal_evidence`.
+M5: `appeals` and `appeal_evidence` tables; `update_decision_status` helper.
 """
 from __future__ import annotations
 
@@ -32,6 +32,28 @@ CREATE TABLE IF NOT EXISTS decisions (
     attribution     TEXT NOT NULL,   -- "AI" | "human" | "uncertain"
     status          TEXT NOT NULL DEFAULT 'active',
     created_at      TEXT NOT NULL    -- ISO-8601 UTC
+);
+
+CREATE TABLE IF NOT EXISTS appeals (
+    appeal_id          TEXT PRIMARY KEY,
+    submission_id      TEXT NOT NULL,
+    author_id          TEXT NOT NULL,
+    reasoning          TEXT NOT NULL,
+    original_decision  TEXT NOT NULL,   -- JSON snapshot {combined_score, attribution, final_label}
+    status             TEXT NOT NULL DEFAULT 'Under Review',
+    created_at         TEXT NOT NULL,   -- ISO-8601 UTC
+    FOREIGN KEY (submission_id) REFERENCES decisions(submission_id)
+);
+
+CREATE TABLE IF NOT EXISTS appeal_evidence (
+    evidence_id    TEXT PRIMARY KEY,
+    appeal_id      TEXT NOT NULL,
+    filename       TEXT NOT NULL,
+    content_type   TEXT NOT NULL,
+    captured_at    TEXT NOT NULL,    -- ISO-8601 from the client (when screenshot/doc was captured)
+    description    TEXT NOT NULL,
+    data           BLOB NOT NULL,
+    FOREIGN KEY (appeal_id) REFERENCES appeals(appeal_id)
 );
 """
 
@@ -153,3 +175,87 @@ def get_decisions(author_id: str | None = None, limit: int = 50) -> list[dict]:
         data["features"] = json.loads(data["features"])
         out.append(data)
     return out
+
+
+# ---- M5: appeals ------------------------------------------------------------
+
+def update_decision_status(submission_id: str, status: str) -> None:
+    """Flip a decision's status (e.g. 'active' → 'Under Review'). Score/label
+    fields are immutable per planning.md §4 — only `status` is touched."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE decisions SET status = ? WHERE submission_id = ?",
+            (status, submission_id),
+        )
+
+
+def insert_appeal(
+    appeal_id: str,
+    submission_id: str,
+    author_id: str,
+    reasoning: str,
+    original_decision: dict,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO appeals
+                (appeal_id, submission_id, author_id, reasoning,
+                 original_decision, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'Under Review', ?)
+            """,
+            (
+                appeal_id,
+                submission_id,
+                author_id,
+                reasoning,
+                json.dumps(original_decision),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
+def insert_evidence(
+    evidence_id: str,
+    appeal_id: str,
+    filename: str,
+    content_type: str,
+    captured_at: str,
+    description: str,
+    data: bytes,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO appeal_evidence
+                (evidence_id, appeal_id, filename, content_type,
+                 captured_at, description, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (evidence_id, appeal_id, filename, content_type,
+             captured_at, description, data),
+        )
+
+
+def get_appeal(appeal_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM appeals WHERE appeal_id = ?",
+            (appeal_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    data["original_decision"] = json.loads(data["original_decision"])
+    return data
+
+
+def get_evidence_for_appeal(appeal_id: str) -> list[dict]:
+    """Evidence attachments for an appeal, sorted by captured_at (oldest first)
+    so the reviewer reads progression as a timeline (planning.md §4)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM appeal_evidence WHERE appeal_id = ? ORDER BY captured_at ASC",
+            (appeal_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]

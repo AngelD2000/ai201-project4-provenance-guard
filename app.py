@@ -4,19 +4,37 @@ M4: `POST /submit` runs Signal 1 (stylometric) + Signal 2 (Groq LLM-as-judge),
 combines them via the §1 agreement gate, persists the full decision trace, and
 returns {attribution, confidence, label}. `GET /log` reads back the most-recent
 entries, optionally scoped to an author.
+
+M5: `POST /appeal` lets the original author contest a decision. Verifies the
+author matches the submission, accepts an optional list of evidence
+attachments (≤10, ≤5 MB each), flips the decision's status to "Under Review"
+without mutating any score/label fields.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import uuid
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from db import get_decisions, init_db, insert_decision
+from db import (
+    get_decision,
+    get_decisions,
+    init_db,
+    insert_appeal,
+    insert_decision,
+    insert_evidence,
+    update_decision_status,
+)
 from signals.combiner import combine
 from signals.llm_judge import judge
 from signals.stylometric import compute_stylo_score
+
+_MAX_ATTACHMENTS = 10
+_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 
 load_dotenv()
 
@@ -99,6 +117,99 @@ def log():
         for r in rows
     ]
     return jsonify({"entries": entries}), 200
+
+
+@app.post("/appeal")
+def appeal():
+    """Author-contested appeal against a /submit decision.
+
+    Validation order (matters for the right status codes):
+      1. Body shape + required fields → 400
+      2. Evidence schema + caps → 400 / 413
+      3. Submission lookup → 404
+      4. Author match → 403
+      5. Persist appeal + evidence, flip decision status → 202
+    """
+    payload = request.get_json()
+    if not isinstance(payload, dict):
+        return jsonify({"error": "request body must be a JSON object"}), 400
+
+    submission_id = payload.get("submission_id")
+    author_id     = payload.get("author_id")
+    reasoning     = payload.get("reasoning")
+    evidence      = payload.get("evidence", [])
+
+    if not isinstance(submission_id, str) or not submission_id.strip():
+        return jsonify({"error": "submission_id is required"}), 400
+    if not isinstance(author_id, str) or not author_id.strip():
+        return jsonify({"error": "author_id is required"}), 400
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        return jsonify({"error": "reasoning is required"}), 400
+    if not isinstance(evidence, list):
+        return jsonify({"error": "evidence must be an array"}), 400
+
+    # Evidence caps + schema. Decode base64 here so we can size-check the real
+    # payload (not the base64-inflated length).
+    if len(evidence) > _MAX_ATTACHMENTS:
+        return jsonify({
+            "error": f"too many attachments (max {_MAX_ATTACHMENTS})"
+        }), 413
+
+    decoded_attachments = []
+    for att in evidence:
+        if not isinstance(att, dict):
+            return jsonify({"error": "each evidence item must be an object"}), 400
+        for field in ("filename", "content_type", "captured_at", "description", "data"):
+            v = att.get(field)
+            if not isinstance(v, str) or not v.strip():
+                return jsonify({"error": f"evidence.{field} is required"}), 400
+        try:
+            blob = base64.b64decode(att["data"], validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "evidence.data must be valid base64"}), 400
+        if len(blob) > _MAX_ATTACHMENT_BYTES:
+            return jsonify({
+                "error": f"attachment exceeds {_MAX_ATTACHMENT_BYTES} bytes"
+            }), 413
+        decoded_attachments.append((att, blob))
+
+    # Lookup + authorization.
+    original = get_decision(submission_id)
+    if original is None:
+        return jsonify({"error": "submission not found"}), 404
+    if original["author_id"] != author_id:
+        return jsonify({"error": "author_id does not match submission"}), 403
+
+    # Persist. Decision row stays immutable except for `status`.
+    appeal_id = str(uuid.uuid4())
+    insert_appeal(
+        appeal_id=appeal_id,
+        submission_id=submission_id,
+        author_id=author_id,
+        reasoning=reasoning,
+        original_decision={
+            "combined_score": original["combined_score"],
+            "attribution":    original["attribution"],
+            "final_label":    original["final_label"],
+        },
+    )
+    for att, blob in decoded_attachments:
+        insert_evidence(
+            evidence_id=str(uuid.uuid4()),
+            appeal_id=appeal_id,
+            filename=att["filename"],
+            content_type=att["content_type"],
+            captured_at=att["captured_at"],
+            description=att["description"],
+            data=blob,
+        )
+    update_decision_status(submission_id, "Under Review")
+
+    return jsonify({
+        "submission_id": submission_id,
+        "appeal_id":     appeal_id,
+        "status":        "Under Review",
+    }), 202
 
 
 if __name__ == "__main__":

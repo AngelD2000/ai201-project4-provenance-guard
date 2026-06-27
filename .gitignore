@@ -23,3 +23,6 @@ provenance.db-journal
 .DS_Store
 .vscode/
 .idea/
+
+# Local scratch
+scratch_paper.md
