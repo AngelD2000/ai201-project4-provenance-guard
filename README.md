@@ -69,6 +69,81 @@ request 12: HTTP 429
 ```
 
 
+### Audit log (GET /log)
+
+Every `/submit` writes one row to SQLite; `/log` returns those rows as structured JSON, newest-first. Each entry carries every field a reviewer or auditor needs to reconstruct *why* the system landed where it did:
+
+| Field | Type | What it captures |
+| --- | --- | --- |
+| `timestamp` | ISO-8601 UTC | When the decision was made |
+| `content_id` | UUID | The submission's identifier (matches `/submit` response) |
+| `creator_id` | string | Author identity (provided by the platform at submit time) |
+| `engine` | `essay` \| `poetry` \| `short_form` | Which stylometric engine routed the text |
+| `stylo_score` | float ∈ [0,1] | Signal 1 — stylometric heuristics, AI-direction |
+| `llm_score` | float ∈ [0,1] \| null | Signal 2 — Groq judge, AI-direction. `null` when the judge call failed (combiner falls back to "uncertain") |
+| `confidence` | float ∈ [0,1] | Combined score = mean of the two signals (magnitude of AI-ness) |
+| `signals_agreed` | bool | Whether both signals individually leaned the same direction |
+| `attribution` | `AI` \| `human` \| `uncertain` | The short verdict |
+| `label` | one of three canonical strings | Public transparency label (see `labels.py`) |
+| `status` | `active` \| `under_review` | Flipped to `under_review` once `/appeal` is filed |
+| `appeal_reasoning` | string \| null | The creator's reasoning from `/appeal`; `null` if never appealed |
+
+The format is JSON — structured at every layer (DB row → `/log` response → consumer parses it). No console scraping, no string parsing.
+
+**Live evidence — 3 submissions across 2 authors, one appealed:**
+
+```json
+{
+  "entries": [
+    {
+      "appeal_reasoning": null,
+      "attribution": "uncertain",
+      "confidence": 0.3220,
+      "content_id": "0e86467e-113b-4052-8908-6bcbe000173d",
+      "creator_id": "alice",
+      "engine": "essay",
+      "label": "uncertain",
+      "llm_score": 0.200,
+      "signals_agreed": false,
+      "status": "active",
+      "stylo_score": 0.4440,
+      "timestamp": "2026-06-27T23:16:49.175777+00:00"
+    },
+    {
+      "appeal_reasoning": null,
+      "attribution": "human",
+      "confidence": 0.1571,
+      "content_id": "626626a3-3ab9-4959-82a6-27a2f328f0d4",
+      "creator_id": "bob",
+      "engine": "essay",
+      "label": "high-confidence human",
+      "llm_score": 0.100,
+      "signals_agreed": true,
+      "status": "active",
+      "stylo_score": 0.2142,
+      "timestamp": "2026-06-27T23:16:48.509786+00:00"
+    },
+    {
+      "appeal_reasoning": "I wrote this myself from personal experience. I am a non-native English speaker and my writing style may appear more formal than typical.",
+      "attribution": "AI",
+      "confidence": 0.7386,
+      "content_id": "2970c315-3bef-443c-92a9-3a1e7bb2609e",
+      "creator_id": "alice",
+      "engine": "essay",
+      "label": "high-confidence AI",
+      "llm_score": 0.800,
+      "signals_agreed": true,
+      "status": "under_review",
+      "stylo_score": 0.6772,
+      "timestamp": "2026-06-27T23:16:47.773912+00:00"
+    }
+  ]
+}
+```
+
+Three entries cover all three label classes (`high-confidence AI`, `high-confidence human`, `uncertain`), two `creator_id` values, both an `active` and an `under_review` submission, and the appeal_reasoning populated on the appealed row.
+
+
 ## Signals
 1. Stylometric heuristics
     - Good because: 
