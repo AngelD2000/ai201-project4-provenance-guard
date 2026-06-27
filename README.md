@@ -36,8 +36,6 @@ This project is a backend system that any creative sharing platform could plug i
 
 *Abuser model.* The smallest meaningful abuse is automation — a script flooding `/submit` to either (a) probe the classifier for blind spots or (b) starve our shared Groq quota for everyone else. At 10/min per IP, sustained automation is capped at 0.17 RPS — orders of magnitude below the model's free-tier ceiling and easy to detect. The 100/day cap also catches the "slow drip" abuser whose per-minute rate stays under any per-minute window — they still hit the wall by lunchtime.
 
-*Why not the previous 5000/3s?* That's ~1666 RPS per IP — well above any realistic writer (no human refreshes a curl loop a thousand times a second), and well above what one IP could be doing for any legitimate reason. It made the limiter a no-op against any real abuser: a script could exhaust the model quota in seconds without ever tripping the gate. The numbers above shift the limiter from cosmetic to load-bearing.
-
 *Why scope only to /submit?* `/submit` calls Groq (real money + shared quota); `/log` is a cheap SQLite read and `/appeal` is insert-only. Limiting the expensive endpoint is the smallest intervention that protects the actual scarce resource.
 
 **Storage:** `memory://` — fine for single-process dev; production should swap to a Redis backend so the limit holds across processes.
