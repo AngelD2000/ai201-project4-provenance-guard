@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Provenance Guard — demo</title>
+<style>
+  :root {
+    --bg:        #fafaf7;
+    --panel:     #ffffff;
+    --border:    #e5e3dd;
+    --text:      #1a1a1a;
+    --muted:     #6f6f6f;
+    --accent:    #1e293b;
+    --ai:        #c2410c;
+    --human:     #15803d;
+    --uncertain: #6f6f6f;
+    --warning:   #b91c1c;
+    --bar-bg:    #ede9e0;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  header { margin-bottom: 24px; }
+  header h1 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    font-weight: 600;
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  textarea {
+    width: 100%;
+    min-height: 140px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    resize: vertical;
+    background: var(--bg);
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  input[type=text] {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+    background: var(--bg);
+    min-width: 180px;
+  }
+  button {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    cursor: pointer;
+    font: inherit;
+    color: var(--text);
+  }
+  button.primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  button:hover { filter: brightness(0.96); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .sample-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .sample-row button {
+    font-size: 12px;
+    padding: 4px 10px;
+    color: var(--muted);
+  }
+
+  /* Result */
+  #result { display: none; }
+  .badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    margin-right: 10px;
+  }
+  .badge.ai        { background: #ffedd5; color: var(--ai); }
+  .badge.human     { background: #dcfce7; color: var(--human); }
+  .badge.uncertain { background: #ececec; color: var(--uncertain); }
+  .confidence {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .scores {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 4px 12px;
+    align-items: center;
+    margin-top: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .scores .label { color: var(--muted); }
+  .scores .value { text-align: right; }
+  .bar {
+    height: 6px;
+    background: var(--bar-bg);
+    border-radius: 3px;
+    position: relative;
+    overflow: hidden;
+  }
+  .bar > span {
+    position: absolute;
+    inset: 0;
+    background: var(--accent);
+    width: 0%;
+  }
+
+  /* Log */
+  .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .log-header h2 { margin: 0; }
+  .log-controls { display: flex; gap: 8px; align-items: center; }
+  .log-controls .hint { color: var(--muted); font-size: 12px; }
+  .entry {
+    border-top: 1px solid var(--border);
+    padding: 14px 0;
+  }
+  .entry:first-of-type { border-top: none; padding-top: 4px; }
+  .entry-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .entry-head .ts {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .entry-head .author {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .entry-head .status {
+    margin-left: auto;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .entry-head .status.under_review {
+    color: var(--warning);
+    font-weight: 600;
+  }
+  .entry-meta {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .entry-meta b { color: var(--text); font-weight: 600; }
+  .entry-appeal {
+    background: #fff7ed;
+    border-left: 3px solid var(--ai);
+    padding: 8px 12px;
+    margin-top: 8px;
+    font-size: 13px;
+    border-radius: 0 4px 4px 0;
+  }
+  .entry-appeal .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ai);
+    margin-bottom: 2px;
+  }
+  .entry-actions { margin-top: 8px; }
+  .entry-actions button { font-size: 12px; padding: 4px 10px; }
+
+  /* Appeal form */
+  .appeal-form {
+    background: var(--bg);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    margin-top: 8px;
+    display: none;
+  }
+  .appeal-form.open { display: block; }
+  .appeal-form textarea { min-height: 60px; font-size: 12px; }
+  .appeal-form .row { margin-top: 6px; }
+
+  .error {
+    background: #fef2f2;
+    border-left: 3px solid var(--warning);
+    color: var(--warning);
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Provenance Guard</h1>
+    <p>Submit text, get an AI/human attribution and audit log entry. Appeal a decision to flip its status to <code>under_review</code>.</p>
+  </header>
+
+  <section class="panel">
+    <h2>Submit text</h2>
+    <textarea id="text" placeholder="Paste a paragraph here…"></textarea>
+    <div class="sample-row">
+      <button data-sample="ai">try: AI paragraph</button>
+      <button data-sample="human">try: human paragraph</button>
+      <button data-sample="formal">try: formal academic</button>
+      <button data-sample="edited">try: edited AI</button>
+    </div>
+    <div class="row">
+      <input id="author" type="text" placeholder="author_id (e.g. alice)" value="alice" />
+      <button id="submit" class="primary">Submit</button>
+      <span class="hint" style="color:var(--muted); font-size:12px;">/submit is rate-limited to 10/min · 100/day</span>
+    </div>
+    <div id="submit-error" class="error" style="display:none;"></div>
+    <div id="result" class="panel" style="margin-top:16px; margin-bottom:0;">
+      <h2>Last result</h2>
+      <div>
+        <span id="result-badge" class="badge"></span>
+        <span id="result-confidence" class="confidence"></span>
+      </div>
+      <div class="scores">
+        <span class="label">stylo_score</span>
+        <span class="bar"><span id="stylo-bar"></span></span>
+        <span class="value" id="stylo-value"></span>
+
+        <span class="label">llm_score</span>
+        <span class="bar"><span id="llm-bar"></span></span>
+        <span class="value" id="llm-value"></span>
+
+        <span class="label">combined</span>
+        <span class="bar"><span id="combined-bar"></span></span>
+        <span class="value" id="combined-value"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="log-header">
+      <h2>Audit log <span id="log-scope" style="font-size:11px; color:var(--muted); text-transform:none; letter-spacing:0;"></span></h2>
+      <div class="log-controls">
+        <span class="hint" id="log-count">0 entries</span>
+        <button id="refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="log" class="empty">No submissions yet — try one above.</div>
+  </section>
+</main>
+
+<script>
+const SAMPLES = {
+  ai: `Artificial intelligence represents a transformative paradigm shift in modern society.
+It is important to note that while the benefits of AI are numerous, it is equally
+essential to consider the ethical implications. Furthermore, stakeholders across
+various sectors must collaborate to ensure responsible deployment.`,
+  human: `ok so i finally tried that new ramen place downtown and honestly?
+underwhelming. the broth was fine but they put WAY too much sodium in it and
+i was thirsty for like three hours after. my friend got the spicy version and
+said it was better. probably won't go back unless someone drags me there`,
+  formal: `The relationship between monetary policy and asset price inflation has been
+extensively studied in the literature. Central banks face a fundamental tension
+between their mandate for price stability and the unintended consequences of
+prolonged low interest rates on equity and real estate valuations.`,
+  edited: `I've been thinking a lot about remote work lately. There are genuine tradeoffs —
+flexibility and no commute on one side, isolation and blurred work-life boundaries
+on the other. Studies show productivity varies widely by individual and role type.`,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function labelClass(attribution) {
+  if (attribution === "AI")     return "ai";
+  if (attribution === "human")  return "human";
+  return "uncertain";
+}
+
+function pct(n) { return Math.max(0, Math.min(100, n * 100)).toFixed(0) + "%"; }
+function num(n) {
+  if (n === null || n === undefined) return "n/a";
+  return n.toFixed(3);
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  return { status: r.status, data };
+}
+
+document.querySelectorAll(".sample-row button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    $("text").value = SAMPLES[btn.dataset.sample] || "";
+  });
+});
+
+$("submit").addEventListener("click", async () => {
+  const text = $("text").value;
+  const author_id = $("author").value;
+  $("submit-error").style.display = "none";
+  $("submit").disabled = true;
+  try {
+    const { status, data } = await api("POST", "/submit", { text, author_id });
+    if (status !== 200) {
+      $("submit-error").textContent = (data && (data.error || data.detail)) || `HTTP ${status}`;
+      $("submit-error").style.display = "block";
+      return;
+    }
+    // Pull the matching log entry to get the individual scores (the /submit
+    // response is intentionally minimal — scores live on /log).
+    const { data: log } = await scopedLog();
+    const entry = (log.entries || []).find(e => e.content_id === data.submission_id);
+    renderResult(data, entry);
+    renderLog(log);
+  } finally {
+    $("submit").disabled = false;
+  }
+});
+
+$("refresh").addEventListener("click", refreshLog);
+$("author").addEventListener("input", refreshLog);
+
+function currentAuthor() {
+  return ($("author").value || "").trim();
+}
+
+async function scopedLog() {
+  const a = currentAuthor();
+  const path = a ? `/log?author_id=${encodeURIComponent(a)}` : "/log";
+  const r = await api("GET", path);
+  return { data: r.data };
+}
+
+async function refreshLog() {
+  const a = currentAuthor();
+  $("log-scope").textContent = a ? `· scoped to ${a}` : "· all authors";
+  const { data } = await scopedLog();
+  renderLog(data);
+}
+
+function renderResult(submit, entry) {
+  $("result").style.display = "block";
+  const cls = labelClass(submit.attribution);
+  const badge = $("result-badge");
+  badge.textContent = submit.label;
+  badge.className = "badge " + cls;
+  $("result-confidence").textContent = `confidence ${num(submit.confidence)}`;
+
+  const stylo = entry ? entry.stylo_score : null;
+  const llm   = entry ? entry.llm_score   : null;
+  const comb  = submit.confidence;
+  $("stylo-value").textContent  = num(stylo);
+  $("llm-value").textContent    = num(llm);
+  $("combined-value").textContent = num(comb);
+  $("stylo-bar").style.width    = stylo !== null ? pct(stylo) : "0%";
+  $("llm-bar").style.width      = llm   !== null ? pct(llm)   : "0%";
+  $("combined-bar").style.width = comb  !== null ? pct(comb)  : "0%";
+}
+
+function renderLog(data) {
+  const log = $("log");
+  const entries = data.entries || [];
+  $("log-count").textContent = entries.length + " " + (entries.length === 1 ? "entry" : "entries");
+  if (entries.length === 0) {
+    log.className = "empty";
+    const a = currentAuthor();
+    log.textContent = a
+      ? `No submissions for ${a} yet — try one above.`
+      : "No submissions yet — try one above.";
+    return;
+  }
+  log.className = "";
+  log.innerHTML = "";
+  for (const e of entries) {
+    const div = document.createElement("div");
+    div.className = "entry";
+    const cls = labelClass(e.attribution);
+    const ts = new Date(e.timestamp).toLocaleString();
+    const statusCls = e.status === "under_review" ? "status under_review" : "status";
+    // Only AI verdicts are appealable — a writer wouldn't contest a "human" or
+    // "uncertain" call, only one that explicitly flags them as AI.
+    const canAppeal = e.status === "active" && e.attribution === "AI";
+    div.innerHTML = `
+      <div class="entry-head">
+        <span class="ts">${ts}</span>
+        <span class="author">${escapeHtml(e.creator_id)}</span>
+        <span class="badge ${cls}">${escapeHtml(e.label)}</span>
+        <span class="${statusCls}">${escapeHtml(e.status)}</span>
+      </div>
+      <div class="entry-meta">
+        <span>stylo <b>${num(e.stylo_score)}</b></span>
+        <span>llm <b>${num(e.llm_score)}</b></span>
+        <span>combined <b>${num(e.confidence)}</b></span>
+        <span>engine <b>${escapeHtml(e.engine)}</b></span>
+        <span>signals_agreed <b>${e.signals_agreed}</b></span>
+      </div>
+      ${e.appeal_reasoning ? `
+        <div class="entry-appeal">
+          <div class="label">Appeal filed</div>
+          <div>${escapeHtml(e.appeal_reasoning)}</div>
+        </div>
+      ` : ""}
+      ${canAppeal ? `
+        <div class="entry-actions">
+          <button data-appeal="${e.content_id}">Appeal this</button>
+        </div>
+        <div class="appeal-form" id="appeal-${e.content_id}">
+          <textarea placeholder="creator_reasoning — why is this misclassified?"></textarea>
+          <div class="row">
+            <button data-appeal-submit="${e.content_id}" class="primary">Send appeal</button>
+            <button data-appeal-cancel="${e.content_id}">Cancel</button>
+          </div>
+        </div>
+      ` : ""}
+    `;
+    log.appendChild(div);
+  }
+  wireAppealButtons();
+}
+
+function wireAppealButtons() {
+  document.querySelectorAll("[data-appeal]").forEach(btn => {
+    btn.onclick = () => {
+      const cid = btn.dataset.appeal;
+      $("appeal-" + cid).classList.add("open");
+    };
+  });
+  document.querySelectorAll("[data-appeal-cancel]").forEach(btn => {
+    btn.onclick = () => {
+      const cid = btn.dataset.appealCancel;
+      $("appeal-" + cid).classList.remove("open");
+    };
+  });
+  document.querySelectorAll("[data-appeal-submit]").forEach(btn => {
+    btn.onclick = async () => {
+      const cid = btn.dataset.appealSubmit;
+      const form = $("appeal-" + cid);
+      const ta = form.querySelector("textarea");
+      const reasoning = (ta.value || "").trim();
+      if (!reasoning) { ta.focus(); return; }
+      btn.disabled = true;
+      const { status, data } = await api("POST", "/appeal", {
+        content_id: cid,
+        creator_reasoning: reasoning,
+      });
+      btn.disabled = false;
+      if (status !== 202) {
+        alert("Appeal failed: " + (data && (data.error || data.detail) || status));
+        return;
+      }
+      refreshLog();
+    };
+  });
+}
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+// Initial load.
+refreshLog();
+</script>
+</body>
+</html>

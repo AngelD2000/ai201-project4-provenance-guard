@@ -71,6 +71,12 @@ def ratelimit_handler(e):
     }), 429
 
 
+@app.get("/")
+def index():
+    """Single-page demo UI — submit form + live audit log + appeal flow."""
+    return app.send_static_file("index.html")
+
+
 @app.post("/submit")
 @limiter.limit(";".join(SUBMIT_RATE_LIMITS), exempt_when=lambda: app.config.get("TESTING", False))
 def submit():

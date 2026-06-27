@@ -225,7 +225,8 @@ Three entries cover all three label classes (`high-confidence AI`, `high-confide
             └────────────────────┘
 
    ┌─────────────────────────────────────────────────────────────────────────┐
-   │ NON-FUNCTIONAL: Rate limit ≈ 5k TP / 3s (US-scale assumption)           │
+   │ NON-FUNCTIONAL: /submit rate-limited to 10/min + 100/day per IP         │
+   │                 (in-memory; see "Rate limits" section for rationale)     │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
