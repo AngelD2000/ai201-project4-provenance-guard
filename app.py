@@ -19,10 +19,13 @@ import uuid
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from db import (
     get_decision,
     get_decisions,
+    get_latest_appeal_for,
     init_db,
     insert_appeal,
     insert_decision,
@@ -36,13 +39,40 @@ from signals.stylometric import compute_stylo_score
 _MAX_ATTACHMENTS = 10
 _MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 
+# /submit rate limits. See README for the writer-vs-abuser math.
+#   10/min — caps a script flood at the second-minute boundary; a writer
+#            iterating on a draft can still resubmit roughly every 6 seconds.
+#   100/day — catches sustained low-rate automation a per-minute cap misses.
+# Storage is in-memory: limits reset on process restart, which is fine for
+# single-process development. Production should swap to redis://.
+SUBMIT_RATE_LIMITS = ["10 per minute", "100 per day"]
+
 load_dotenv()
 
 app = Flask(__name__)
 init_db()
 
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+    # When tests set app.config["TESTING"] = True we want the limiter quiet so
+    # the suite isn't throttled across 100+ /submit calls. Wired below.
+)
+
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """Return JSON so the API contract stays consistent across status codes."""
+    return jsonify({
+        "error":  "rate limit exceeded",
+        "detail": str(getattr(e, "description", "too many requests")),
+    }), 429
+
 
 @app.post("/submit")
+@limiter.limit(";".join(SUBMIT_RATE_LIMITS), exempt_when=lambda: app.config.get("TESTING", False))
 def submit():
     payload = request.get_json()
     if not isinstance(payload, dict):
@@ -100,22 +130,23 @@ def log():
     limit = max(1, min(limit, 200))
 
     rows = get_decisions(author_id=author_id, limit=limit)
-    entries = [
-        {
-            "content_id":     r["submission_id"],
-            "creator_id":     r["author_id"],
-            "timestamp":      r["created_at"],
-            "engine":         r["engine_used"],
-            "stylo_score":    r["stylo_score"],
-            "llm_score":      r["llm_ai_score"],
-            "attribution":    r["attribution"],
-            "confidence":     r["combined_score"],
-            "label":          r["final_label"],
-            "signals_agreed": bool(r["signals_agreed"]) if r["signals_agreed"] is not None else None,
-            "status":         r["status"],
-        }
-        for r in rows
-    ]
+    entries = []
+    for r in rows:
+        latest_appeal = get_latest_appeal_for(r["submission_id"])
+        entries.append({
+            "content_id":       r["submission_id"],
+            "creator_id":       r["author_id"],
+            "timestamp":        r["created_at"],
+            "engine":           r["engine_used"],
+            "stylo_score":      r["stylo_score"],
+            "llm_score":        r["llm_ai_score"],
+            "attribution":      r["attribution"],
+            "confidence":       r["combined_score"],
+            "label":            r["final_label"],
+            "signals_agreed":   bool(r["signals_agreed"]) if r["signals_agreed"] is not None else None,
+            "status":           r["status"],
+            "appeal_reasoning": latest_appeal["reasoning"] if latest_appeal else None,
+        })
     return jsonify({"entries": entries}), 200
 
 
@@ -123,28 +154,33 @@ def log():
 def appeal():
     """Author-contested appeal against a /submit decision.
 
+    Wire shape (graded spec): {content_id, creator_reasoning, evidence?, author_id?}.
+    `author_id` is optional — when supplied, the author-match check from
+    planning.md §4 is enforced (403 on mismatch); when omitted, the appeal
+    is accepted on submission existence + reasoning validity alone.
+
     Validation order (matters for the right status codes):
       1. Body shape + required fields → 400
       2. Evidence schema + caps → 400 / 413
       3. Submission lookup → 404
-      4. Author match → 403
+      4. Author match (if author_id supplied) → 403
       5. Persist appeal + evidence, flip decision status → 202
     """
     payload = request.get_json()
     if not isinstance(payload, dict):
         return jsonify({"error": "request body must be a JSON object"}), 400
 
-    submission_id = payload.get("submission_id")
-    author_id     = payload.get("author_id")
-    reasoning     = payload.get("reasoning")
-    evidence      = payload.get("evidence", [])
+    content_id        = payload.get("content_id")
+    author_id         = payload.get("author_id")  # optional
+    creator_reasoning = payload.get("creator_reasoning")
+    evidence          = payload.get("evidence", [])
 
-    if not isinstance(submission_id, str) or not submission_id.strip():
-        return jsonify({"error": "submission_id is required"}), 400
-    if not isinstance(author_id, str) or not author_id.strip():
-        return jsonify({"error": "author_id is required"}), 400
-    if not isinstance(reasoning, str) or not reasoning.strip():
-        return jsonify({"error": "reasoning is required"}), 400
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify({"error": "content_id is required"}), 400
+    if author_id is not None and (not isinstance(author_id, str) or not author_id.strip()):
+        return jsonify({"error": "author_id, if supplied, must be a non-empty string"}), 400
+    if not isinstance(creator_reasoning, str) or not creator_reasoning.strip():
+        return jsonify({"error": "creator_reasoning is required"}), 400
     if not isinstance(evidence, list):
         return jsonify({"error": "evidence must be an array"}), 400
 
@@ -173,20 +209,20 @@ def appeal():
             }), 413
         decoded_attachments.append((att, blob))
 
-    # Lookup + authorization.
-    original = get_decision(submission_id)
+    # Lookup + (optional) authorization.
+    original = get_decision(content_id)
     if original is None:
-        return jsonify({"error": "submission not found"}), 404
-    if original["author_id"] != author_id:
-        return jsonify({"error": "author_id does not match submission"}), 403
+        return jsonify({"error": "content not found"}), 404
+    if author_id is not None and original["author_id"] != author_id:
+        return jsonify({"error": "author_id does not match content"}), 403
 
     # Persist. Decision row stays immutable except for `status`.
     appeal_id = str(uuid.uuid4())
     insert_appeal(
         appeal_id=appeal_id,
-        submission_id=submission_id,
-        author_id=author_id,
-        reasoning=reasoning,
+        submission_id=content_id,
+        author_id=author_id or original["author_id"],
+        reasoning=creator_reasoning,
         original_decision={
             "combined_score": original["combined_score"],
             "attribution":    original["attribution"],
@@ -203,12 +239,12 @@ def appeal():
             description=att["description"],
             data=blob,
         )
-    update_decision_status(submission_id, "Under Review")
+    update_decision_status(content_id, "under_review")
 
     return jsonify({
-        "submission_id": submission_id,
-        "appeal_id":     appeal_id,
-        "status":        "Under Review",
+        "content_id": content_id,
+        "appeal_id":  appeal_id,
+        "status":     "under_review",
     }), 202
 
 

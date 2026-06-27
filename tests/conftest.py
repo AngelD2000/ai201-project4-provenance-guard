@@ -36,10 +36,26 @@ def fresh_db():
 
 @pytest.fixture
 def app_client(fresh_db, monkeypatch):
-    """Flask test client backed by a fresh DB and a mockable judge."""
+    """Flask test client backed by a fresh DB and a mockable judge.
+
+    TESTING=True exempts /submit from the rate limiter so the suite isn't
+    throttled across 100+ calls. Use `rate_limited_client` for limiter tests.
+    """
     import app
     app.app.config["TESTING"] = True
     return app.app.test_client()
+
+
+@pytest.fixture
+def rate_limited_client(fresh_db, monkeypatch):
+    """Flask test client with the limiter ARMED. Storage is reset per-test."""
+    import app
+    app.app.config["TESTING"] = False
+    # Wipe the in-memory limiter state so tests don't leak across runs.
+    app.limiter.reset()
+    yield app.app.test_client()
+    app.app.config["TESTING"] = True
+    app.limiter.reset()
 
 
 @pytest.fixture

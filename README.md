@@ -25,8 +25,48 @@ This project is a backend system that any creative sharing platform could plug i
         * Update content status to "Under Review"
 
 ## Non-functional
-- Rate liimiting
-    * Assuming just people in the US let's do 5k TP 3s
+
+### Rate limits (POST /submit)
+
+`10 per minute` + `100 per day`, keyed by client IP, in-memory storage.
+
+**Why these numbers:**
+
+*Writer model.* A real user iterating on a draft will paste a paragraph, read the result, edit, resubmit. Pacing of roughly one submission every 5–10 seconds is a realistic upper bound for thoughtful editing. The 10/min ceiling lines up with that — a writer revising a piece across an editing session won't notice the cap, but someone refreshing the same paragraph rapidly will. Over a full day, 100 distinct paragraphs (≈ a chapter's worth of voice-checking) covers a productive workshop session.
+
+*Abuser model.* The smallest meaningful abuse is automation — a script flooding `/submit` to either (a) probe the classifier for blind spots or (b) starve our shared Groq quota for everyone else. At 10/min per IP, sustained automation is capped at 0.17 RPS — orders of magnitude below the model's free-tier ceiling and easy to detect. The 100/day cap also catches the "slow drip" abuser whose per-minute rate stays under any per-minute window — they still hit the wall by lunchtime.
+
+*Why not the previous 5000/3s?* That's ~1666 RPS per IP — well above any realistic writer (no human refreshes a curl loop a thousand times a second), and well above what one IP could be doing for any legitimate reason. It made the limiter a no-op against any real abuser: a script could exhaust the model quota in seconds without ever tripping the gate. The numbers above shift the limiter from cosmetic to load-bearing.
+
+*Why scope only to /submit?* `/submit` calls Groq (real money + shared quota); `/log` is a cheap SQLite read and `/appeal` is insert-only. Limiting the expensive endpoint is the smallest intervention that protects the actual scarce resource.
+
+**Storage:** `memory://` — fine for single-process dev; production should swap to a Redis backend so the limit holds across processes.
+
+**Evidence — 12 rapid POSTs against the live limiter:**
+
+```text
+request 1: HTTP 200
+request 2: HTTP 200
+request 3: HTTP 200
+request 4: HTTP 200
+request 5: HTTP 200
+request 6: HTTP 200
+request 7: HTTP 200
+request 8: HTTP 200
+request 9: HTTP 200
+request 10: HTTP 429
+request 11: HTTP 429
+request 12: HTTP 429
+```
+
+(Bucket was at 10 by the 10th call because an earlier /submit had already consumed 1 slot in the per-IP window.) The 429 body:
+
+```json
+{
+  "detail": "10 per 1 minute",
+  "error":  "rate limit exceeded"
+}
+```
 
 
 ## Signals

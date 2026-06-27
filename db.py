@@ -259,3 +259,23 @@ def get_evidence_for_appeal(appeal_id: str) -> list[dict]:
             (appeal_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_latest_appeal_for(submission_id: str) -> dict | None:
+    """Most-recent appeal against a submission (or None if never appealed).
+    Used by /log to surface `appeal_reasoning` alongside the decision row."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM appeals
+            WHERE submission_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (submission_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    data["original_decision"] = json.loads(data["original_decision"])
+    return data
