@@ -1,6 +1,67 @@
 # ai201-project4-provenance-guard
 This project is a backend system that any creative sharing platform could plug into to classify submitted content, score confidence in that classification, surface a transparency label to users, and handle appeals from creators who believe they've been misclassified.
 
+## Quickstart
+
+### 1. Set up
+
+```bash
+git clone https://github.com/AngelD2000/ai201-project4-provenance-guard.git
+cd ai201-project4-provenance-guard
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Add your Groq API key
+
+Get a free key (no credit card) at https://console.groq.com, then create a `.env` file in the repo root:
+
+```bash
+echo "GROQ_API_KEY=gsk_your_key_here" > .env
+```
+
+(The `.env` file is gitignored — your key never gets committed.)
+
+### 3. Run the server
+
+```bash
+python -m flask --app app run
+```
+
+The server boots on `http://127.0.0.1:5000`. Two useful URLs:
+
+- **`http://127.0.0.1:5000/`** — single-page demo UI (submit form + live audit log + appeal flow)
+- **`http://127.0.0.1:5000/log`** — raw JSON audit log
+
+### 4. Run the tests
+
+```bash
+python -m pytest tests/
+```
+
+114 tests covering the combiner gating logic, both signals, the SQLite layer, the appeal flow, and the rate limiter.
+
+### Hitting the API directly
+
+```bash
+# Classify a piece of text
+curl -s -X POST http://127.0.0.1:5000/submit \
+  -H "Content-Type: application/json" \
+  -d '{"text": "ok so the ramen was actually pretty bad", "author_id": "alice"}' \
+  | python -m json.tool
+
+# Read the audit log (scope to one author with ?author_id=alice)
+curl -s http://127.0.0.1:5000/log | python -m json.tool
+
+# Appeal a decision — grab the submission_id from /submit response above
+curl -s -X POST http://127.0.0.1:5000/appeal \
+  -H "Content-Type: application/json" \
+  -d '{"content_id": "PASTE-CONTENT-ID", "creator_reasoning": "I wrote this myself."}' \
+  | python -m json.tool
+```
+
 ## Functional
 - User should be able to submit a text and get back a structured output with 
     - Input: 
