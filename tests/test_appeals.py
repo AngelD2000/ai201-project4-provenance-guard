@@ -182,7 +182,7 @@ def test_appeal_evidence_invalid_base64_returns_400(app_client, mock_judge):
     assert resp.status_code == 400
 
 
-# ---- 403 / 404 ------------------------------------------------------------
+# ---- 404 ------------------------------------------------------------------
 
 def test_appeal_unknown_content_returns_404(app_client):
     resp = app_client.post("/appeal", json={
@@ -191,12 +191,99 @@ def test_appeal_unknown_content_returns_404(app_client):
     assert resp.status_code == 404
 
 
-def test_appeal_wrong_author_returns_403_when_author_supplied(app_client, mock_judge):
+# ---- Appeal authorization policy ------------------------------------------
+
+def test_third_party_can_appeal(app_client, mock_judge):
+    """Wrong author_id is no longer 403 — third parties may appeal too."""
     cid = _submit_text(app_client, mock_judge, author="alice")
     resp = app_client.post("/appeal", json={
-        "content_id": cid, "author_id": "mallory", "creator_reasoning": "give me",
+        "content_id": cid, "author_id": "bob",
+        "creator_reasoning": "i think alice used AI",
     })
-    assert resp.status_code == 403
+    assert resp.status_code == 202
+
+
+def test_same_appellant_cannot_appeal_same_content_twice(app_client, mock_judge):
+    """Per-appellant dedup: bob can't pile on by submitting two appeals."""
+    cid = _submit_text(app_client, mock_judge, author="alice")
+    first = app_client.post("/appeal", json={
+        "content_id": cid, "author_id": "bob", "creator_reasoning": "first",
+    })
+    assert first.status_code == 202
+    second = app_client.post("/appeal", json={
+        "content_id": cid, "author_id": "bob", "creator_reasoning": "second try",
+    })
+    assert second.status_code == 409
+    assert second.get_json()["error"] == "duplicate appeal"
+
+
+def test_third_party_cap_blocks_sixth_distinct_appellant(app_client, mock_judge):
+    """Cap is 5 — a 6th distinct third party gets 429."""
+    cid = _submit_text(app_client, mock_judge, author="alice")
+    for i in range(5):
+        resp = app_client.post("/appeal", json={
+            "content_id": cid, "author_id": f"user_{i}",
+            "creator_reasoning": f"objection from user_{i}",
+        })
+        assert resp.status_code == 202, f"appeal {i+1} unexpectedly blocked"
+    blocked = app_client.post("/appeal", json={
+        "content_id": cid, "author_id": "user_5",
+        "creator_reasoning": "6th community appeal",
+    })
+    assert blocked.status_code == 429
+    body = blocked.get_json()
+    assert body["error"] == "appeal limit reached"
+    assert "5 community appeals" in body["detail"]
+
+
+def test_creator_can_still_appeal_after_cap_is_hit(app_client, mock_judge):
+    """Cap protects the creator; their own voice is never silenced."""
+    cid = _submit_text(app_client, mock_judge, author="alice")
+    for i in range(5):
+        app_client.post("/appeal", json={
+            "content_id": cid, "author_id": f"user_{i}",
+            "creator_reasoning": "mob complaint",
+        })
+    # Cap is hit. Alice (the creator) appeals — should still succeed.
+    resp = app_client.post("/appeal", json={
+        "content_id": cid, "author_id": "alice",
+        "creator_reasoning": "i actually wrote this, please reconsider",
+    })
+    assert resp.status_code == 202
+
+
+def test_anonymous_appeals_count_toward_cap(app_client, mock_judge):
+    """Anonymous (no author_id) appellants still count against the cap so
+    a single bad actor can't bypass the limit by omitting their ID."""
+    cid = _submit_text(app_client, mock_judge, author="alice")
+    for i in range(5):
+        resp = app_client.post("/appeal", json={
+            "content_id": cid, "creator_reasoning": f"anonymous complaint {i}",
+        })
+        assert resp.status_code == 202
+    blocked = app_client.post("/appeal", json={
+        "content_id": cid, "creator_reasoning": "6th anonymous complaint",
+    })
+    assert blocked.status_code == 429
+
+
+def test_creator_appeal_not_counted_toward_third_party_cap(app_client, mock_judge):
+    """Multiple creator appeals don't burn community-appeal budget."""
+    cid = _submit_text(app_client, mock_judge, author="alice")
+    # Alice (the creator) appeals twice — neither should count toward the cap.
+    for _ in range(2):
+        resp = app_client.post("/appeal", json={
+            "content_id": cid, "author_id": "alice",
+            "creator_reasoning": "alice's appeal",
+        })
+        assert resp.status_code == 202
+    # Now 5 third parties can still appeal.
+    for i in range(5):
+        resp = app_client.post("/appeal", json={
+            "content_id": cid, "author_id": f"user_{i}",
+            "creator_reasoning": "third-party appeal",
+        })
+        assert resp.status_code == 202, f"user_{i} was blocked unexpectedly"
 
 
 # ---- 413 evidence caps ----------------------------------------------------

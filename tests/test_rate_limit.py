@@ -39,13 +39,16 @@ def test_rate_limit_only_applies_to_submit_not_log(rate_limited_client, mock_jud
 
 
 def test_appeal_is_not_throttled_by_submit_limiter(rate_limited_client, mock_judge):
-    """The /submit limiter is scoped to /submit; /appeal stays open."""
+    """The /submit limiter is scoped to /submit only — /appeal still goes through.
+
+    (Repeating against the same content would now hit the third-party appeal
+    cap, but that's a separate policy enforced in /appeal itself; this test
+    just confirms the limiter isn't blocking the endpoint at all.)
+    """
     mock_judge(label="Human", confidence=0.9)
     sub = rate_limited_client.post("/submit", json=_payload()).get_json()
     cid = sub["submission_id"]
-    for _ in range(15):
-        resp = rate_limited_client.post("/appeal", json={
-            "content_id": cid, "creator_reasoning": "repeat appeal stress test",
-        })
-        # 202 first time, 202 again — appeals are insert-only and not rate-limited.
-        assert resp.status_code == 202
+    resp = rate_limited_client.post("/appeal", json={
+        "content_id": cid, "creator_reasoning": "rate-limit-bypass check",
+    })
+    assert resp.status_code == 202

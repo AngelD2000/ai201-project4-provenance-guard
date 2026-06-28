@@ -311,6 +311,39 @@ def get_evidence_for_appeal(appeal_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def count_third_party_appeals(submission_id: str, original_author_id: str) -> int:
+    """Number of appeals against `submission_id` filed by anyone other than the
+    original author. Used by /appeal to enforce the community-appeal cap.
+
+    Anonymous appellants (stored as the literal "anonymous") are NOT the
+    original_author_id, so they correctly count as third-party.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM appeals
+            WHERE submission_id = ? AND author_id != ?
+            """,
+            (submission_id, original_author_id),
+        ).fetchone()
+    return int(row["n"])
+
+
+def has_appellant_appealed(submission_id: str, appellant_id: str) -> bool:
+    """True if `appellant_id` has already appealed this submission.
+    Used by /appeal to dedupe a single appellant pile-on."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM appeals
+            WHERE submission_id = ? AND author_id = ?
+            LIMIT 1
+            """,
+            (submission_id, appellant_id),
+        ).fetchone()
+    return row is not None
+
+
 def get_latest_appeal_for(submission_id: str) -> dict | None:
     """Most-recent appeal against a submission (or None if never appealed).
     Used by /log to surface `appeal_reasoning` alongside the decision row."""

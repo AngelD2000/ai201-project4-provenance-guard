@@ -161,7 +161,14 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
 > Answer: Who can appeal? What info do they provide? What does the system do on receipt — status changes, logs? What does a reviewer see in the appeal queue?
 
 - **Who can submit an appeal:**
-  **Only the original author of the submission.** Submissions carry an `author_id` field (provided by the consuming platform at `/submit` time and stored in the `decisions` row); appeals must present a matching `author_id` to be accepted. The consuming platform owns authentication of users → `author_id`; the system enforces that whoever appeals is the same identity that submitted.
+  **Anyone — both the original creator and third parties — with a hard cap on community appeals.** The original design was author-only (the consuming platform authenticates users → `author_id`, and we 403'd anyone else). Live feedback during build made it clear that limitation was too strict: a third party who notices an obvious misclassification on someone else's content has no recourse, even though their concern is legitimate. The revised policy:
+
+  - **Original creator** (`author_id` matches the decision's `author_id`): always allowed, unlimited. Their voice is privileged.
+  - **Third party with identity** (`author_id` differs from the decision's): allowed up to the cap. One appeal per `(content_id, author_id)` — same person can't pile on by submitting twice (409 on duplicate).
+  - **Anonymous third party** (no `author_id` supplied): allowed up to the cap. Stored under the sentinel string `"anonymous"`. Counts toward the cap but can't be deduped — accepting that as the cost of accepting anonymous appeals.
+  - **Past the cap** (5 third-party appeals already filed): third-party appeals return 429; the creator can still file appeals after the cap is hit.
+
+  **Cap value: 5 third-party appeals per content_id.** Small enough that a coordinated mob can't flip a label through volume; large enough that genuine community concern surfaces and reaches a reviewer. Implemented as `_MAX_THIRD_PARTY_APPEALS` in `app.py` so the value can be tuned per-deployment without code surgery. Without a cap, a popular creator drawing a brigade would have every piece sit at `under_review` and the reviewer queue would lose signal entirely.
 
 - **Required appeal inputs:**
   - `content_id: str` — links back to the original decision record (same value as `submission_id` from /submit's response; renamed at the wire per the graded spec)

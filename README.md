@@ -131,6 +131,21 @@ request 12: HTTP 429
 ```
 
 
+### Appeal policy (POST /appeal)
+
+Anyone can appeal a decision — not just the original creator — but the system caps community appeals to prevent a coordinated mob from flipping a label through sheer volume.
+
+| Appellant | Allowed? | Notes |
+|---|---|---|
+| Original creator (`author_id` matches the decision) | **Always** | Never capped. Their voice is privileged. |
+| Third party with an identity (`author_id` ≠ decision's `author_id`) | Up to cap | One appeal per `(content_id, author_id)` — same person can't pile on (409 on duplicate). |
+| Anonymous third party (no `author_id` supplied) | Up to cap | Counts toward the cap; can't be deduped (no identity), so a single bad actor *could* fill the cap by themselves — that's the price of accepting anonymous appeals. |
+| Either third-party flavor past cap | **429** | "This submission has already received N community appeals" |
+
+**Cap:** **5 third-party appeals per content_id** (`_MAX_THIRD_PARTY_APPEALS` in `app.py`). Small enough that a coordinated brigade can't easily push a label change through sheer volume; large enough that genuine community concern surfaces and reaches a reviewer. The creator can still appeal after the cap is hit — their appeal counts as creator-appeal, not third-party, and is never capped.
+
+**Why a cap at all?** Without one, "appeal" turns into a mob-vote button. A creator whose work draws unwanted attention could be drowned in 50 appeals from a single brigading thread, and the audit log would lose all signal: every entry on every popular piece would read `under_review`. With a cap, the reviewer queue stays meaningful — appeals on a piece mean a meaningful slice of the community flagged it, not that someone organized a pile-on.
+
 ### Audit log (GET /log)
 
 Every `/submit` writes one row to SQLite; `/log` returns those rows as structured JSON, newest-first. Each entry carries every field a reviewer or auditor needs to reconstruct *why* the system landed where it did:

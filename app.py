@@ -24,9 +24,11 @@ from flask_limiter.util import get_remote_address
 
 from db import (
     commit_appeal,
+    count_third_party_appeals,
     get_decision,
     get_decisions,
     get_latest_appeal_for,
+    has_appellant_appealed,
     init_db,
     insert_decision,
 )
@@ -36,6 +38,18 @@ from signals.stylometric import compute_stylo_score
 
 _MAX_ATTACHMENTS = 10
 _MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+# Community-appeal cap. Anyone can appeal a decision, but third-party appeals
+# against a single content_id are capped at this number — small enough that a
+# coordinated brigade can't flip a label by sheer volume, large enough that
+# genuine community concern surfaces. The original creator is NEVER capped and
+# can appeal even after the third-party limit is hit.
+_MAX_THIRD_PARTY_APPEALS = 5
+
+# Sentinel stored in appeals.author_id when an appellant doesn't identify
+# themselves. Anonymous appeals count toward the third-party cap but are never
+# deduped (we have no identity to dedupe by).
+_ANONYMOUS_APPELLANT = "anonymous"
 
 # Hard ceiling on the request body Flask is willing to materialize. Sized to
 # fit the worst legal /appeal — 10 attachments × 5 MB plus base64 inflation
@@ -192,19 +206,27 @@ def log():
 
 @app.post("/appeal")
 def appeal():
-    """Author-contested appeal against a /submit decision.
+    """Appeal against a /submit decision. Open to anyone, with a cap.
 
-    Wire shape (graded spec): {content_id, creator_reasoning, evidence?, author_id?}.
-    `author_id` is optional — when supplied, the author-match check from
-    planning.md §4 is enforced (403 on mismatch); when omitted, the appeal
-    is accepted on submission existence + reasoning validity alone.
+    Wire shape: {content_id, creator_reasoning, evidence?, author_id?}.
+
+    Policy (planning.md §4):
+      • If `author_id` matches the original decision's author → creator
+        appeal, never capped.
+      • If `author_id` doesn't match (or is absent → anonymous): third-party
+        appeal, counted against the per-content community-appeal cap. A
+        third party with `author_id` may only appeal once per submission
+        (409 on duplicate); anonymous appellants count toward the cap but
+        aren't deduped.
+      • Once the cap is hit, only the original creator can appeal further.
 
     Validation order (matters for the right status codes):
       1. Body shape + required fields → 400
       2. Evidence schema + caps → 400 / 413
       3. Submission lookup → 404
-      4. Author match (if author_id supplied) → 403
-      5. Persist appeal + evidence, flip decision status → 202
+      4. Duplicate-appellant check → 409
+      5. Third-party cap → 429
+      6. Persist appeal + evidence, flip decision status → 202
     """
     payload = request.get_json()
     if not isinstance(payload, dict):
@@ -249,12 +271,38 @@ def appeal():
             }), 413
         decoded_attachments.append((att, blob))
 
-    # Lookup + (optional) authorization.
+    # Lookup the original decision.
     original = get_decision(content_id)
     if original is None:
         return jsonify({"error": "content not found"}), 404
-    if author_id is not None and original["author_id"] != author_id:
-        return jsonify({"error": "author_id does not match content"}), 403
+
+    # Appeal-authorization policy:
+    #   • Original creator (author_id == decision.author_id): unlimited
+    #   • Third party with identity: one appeal per (content_id, author_id) → 409
+    #   • Third party (with or without identity): counted against the cap → 429
+    is_creator_appeal = (
+        author_id is not None and author_id == original["author_id"]
+    )
+    appellant_id = author_id if author_id is not None else _ANONYMOUS_APPELLANT
+
+    if not is_creator_appeal:
+        if author_id is not None and has_appellant_appealed(content_id, author_id):
+            return jsonify({
+                "error":  "duplicate appeal",
+                "detail": "you have already appealed this submission",
+            }), 409
+        third_party_count = count_third_party_appeals(
+            content_id, original["author_id"],
+        )
+        if third_party_count >= _MAX_THIRD_PARTY_APPEALS:
+            return jsonify({
+                "error":  "appeal limit reached",
+                "detail": (
+                    f"this submission has already received "
+                    f"{_MAX_THIRD_PARTY_APPEALS} community appeals; "
+                    "only the original creator can appeal further"
+                ),
+            }), 429
 
     # Persist. Decision row stays immutable except for `status`. All three
     # writes (appeal + evidence × N + status flip) share one transaction so
@@ -274,7 +322,7 @@ def appeal():
     commit_appeal(
         appeal_id=appeal_id,
         submission_id=content_id,
-        author_id=author_id or original["author_id"],
+        author_id=appellant_id,
         reasoning=creator_reasoning,
         original_decision={
             "combined_score": original["combined_score"],
