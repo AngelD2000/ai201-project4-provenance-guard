@@ -148,3 +148,13 @@ def test_submit_empty_text_returns_400(app_client):
 def test_submit_non_object_body_returns_400(app_client):
     resp = app_client.post("/submit", json=["array body"])
     assert resp.status_code == 400
+
+
+def test_submit_text_over_100kb_returns_413(app_client, mock_judge):
+    """Hard cap on submitted text — protects stylo CPU + DB size."""
+    mock_judge(label="Human", confidence=0.9)
+    oversized = "a" * (100 * 1024 + 1)  # 100 KB + 1 byte
+    resp = app_client.post("/submit", json={"text": oversized, "author_id": "x"})
+    assert resp.status_code == 413
+    body = resp.get_json()
+    assert body["error"] == "text too large"

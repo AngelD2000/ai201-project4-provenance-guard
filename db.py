@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS appeals (
     author_id          TEXT NOT NULL,
     reasoning          TEXT NOT NULL,
     original_decision  TEXT NOT NULL,   -- JSON snapshot {combined_score, attribution, final_label}
-    status             TEXT NOT NULL DEFAULT 'Under Review',
+    status             TEXT NOT NULL DEFAULT 'under_review',
     created_at         TEXT NOT NULL,   -- ISO-8601 UTC
     FOREIGN KEY (submission_id) REFERENCES decisions(submission_id)
 );
@@ -202,7 +202,7 @@ def insert_appeal(
             INSERT INTO appeals
                 (appeal_id, submission_id, author_id, reasoning,
                  original_decision, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'Under Review', ?)
+            VALUES (?, ?, ?, ?, ?, 'under_review', ?)
             """,
             (
                 appeal_id,
@@ -212,6 +212,56 @@ def insert_appeal(
                 json.dumps(original_decision),
                 datetime.now(timezone.utc).isoformat(),
             ),
+        )
+
+
+def commit_appeal(
+    *,
+    appeal_id: str,
+    submission_id: str,
+    author_id: str,
+    reasoning: str,
+    original_decision: dict,
+    evidence_items: list[dict],
+    new_status: str,
+) -> None:
+    """Atomic: insert appeal row, insert evidence rows, flip decision status.
+
+    All three writes share a single transaction. If any insert raises mid-flight
+    the whole appeal rolls back — the decision row's status never flips and no
+    appeal/evidence rows persist. Prevents the partial-write states we'd
+    otherwise see across three separate get_conn() contexts.
+
+    `evidence_items` is a list of dicts shaped:
+        {evidence_id, filename, content_type, captured_at, description, data: bytes}
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO appeals
+                (appeal_id, submission_id, author_id, reasoning,
+                 original_decision, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (appeal_id, submission_id, author_id, reasoning,
+             json.dumps(original_decision), new_status, now),
+        )
+        for ev in evidence_items:
+            conn.execute(
+                """
+                INSERT INTO appeal_evidence
+                    (evidence_id, appeal_id, filename, content_type,
+                     captured_at, description, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ev["evidence_id"], appeal_id, ev["filename"],
+                 ev["content_type"], ev["captured_at"], ev["description"],
+                 ev["data"]),
+            )
+        conn.execute(
+            "UPDATE decisions SET status = ? WHERE submission_id = ?",
+            (new_status, submission_id),
         )
 
 

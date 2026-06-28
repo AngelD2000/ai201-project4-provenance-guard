@@ -23,14 +23,12 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 from db import (
+    commit_appeal,
     get_decision,
     get_decisions,
     get_latest_appeal_for,
     init_db,
-    insert_appeal,
     insert_decision,
-    insert_evidence,
-    update_decision_status,
 )
 from signals.combiner import combine
 from signals.llm_judge import judge
@@ -38,6 +36,17 @@ from signals.stylometric import compute_stylo_score
 
 _MAX_ATTACHMENTS = 10
 _MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+# Hard ceiling on the request body Flask is willing to materialize. Sized to
+# fit the worst legal /appeal — 10 attachments × 5 MB plus base64 inflation
+# (~33% overhead) plus JSON envelope. Anything over this Flask 413s before we
+# ever call get_json(), so attackers can't OOM the process with a giant body.
+_MAX_CONTENT_LENGTH = 75 * 1024 * 1024
+
+# Hard ceiling on submitted text. A normal short story or a chapter is well
+# under 100 KB; rejecting larger inputs prevents pathological stylometric
+# computation and bloated DB rows.
+_MAX_SUBMIT_TEXT_BYTES = 100 * 1024
 
 # /submit rate limits. See README for the writer-vs-abuser math.
 #   10/min — caps a script flood at the second-minute boundary; a writer
@@ -50,6 +59,7 @@ SUBMIT_RATE_LIMITS = ["10 per minute", "100 per day"]
 load_dotenv()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = _MAX_CONTENT_LENGTH
 init_db()
 
 limiter = Limiter(
@@ -69,6 +79,25 @@ def ratelimit_handler(e):
         "error":  "rate limit exceeded",
         "detail": str(getattr(e, "description", "too many requests")),
     }), 429
+
+
+@app.errorhandler(413)
+def too_large_handler(e):
+    """Triggered by MAX_CONTENT_LENGTH on oversized request bodies. Return
+    JSON instead of Flask's default HTML so the API contract is consistent."""
+    return jsonify({
+        "error":  "request too large",
+        "detail": str(getattr(e, "description", "payload exceeds limit")),
+    }), 413
+
+
+@app.errorhandler(500)
+def server_error_handler(e):
+    """Generic 500 → JSON. Stack traces stay in app.logger; we don't leak
+    them to callers. Without this Flask returns an HTML error page and the
+    demo UI's await r.json() blows up parsing it."""
+    app.logger.exception("unhandled exception in request handler")
+    return jsonify({"error": "internal server error"}), 500
 
 
 @app.get("/")
@@ -91,6 +120,11 @@ def submit():
         return jsonify({"error": "text is required"}), 400
     if not isinstance(author_id, str) or not author_id.strip():
         return jsonify({"error": "author_id is required"}), 400
+    if len(text.encode("utf-8")) > _MAX_SUBMIT_TEXT_BYTES:
+        return jsonify({
+            "error":  "text too large",
+            "detail": f"text must be ≤ {_MAX_SUBMIT_TEXT_BYTES} bytes (got {len(text.encode('utf-8'))})",
+        }), 413
 
     submission_id = str(uuid.uuid4())
     stylo = compute_stylo_score(text)
@@ -222,9 +256,22 @@ def appeal():
     if author_id is not None and original["author_id"] != author_id:
         return jsonify({"error": "author_id does not match content"}), 403
 
-    # Persist. Decision row stays immutable except for `status`.
+    # Persist. Decision row stays immutable except for `status`. All three
+    # writes (appeal + evidence × N + status flip) share one transaction so
+    # a mid-flight failure can never leave us with a partially-applied appeal.
     appeal_id = str(uuid.uuid4())
-    insert_appeal(
+    evidence_items = [
+        {
+            "evidence_id":  str(uuid.uuid4()),
+            "filename":     att["filename"],
+            "content_type": att["content_type"],
+            "captured_at":  att["captured_at"],
+            "description":  att["description"],
+            "data":         blob,
+        }
+        for att, blob in decoded_attachments
+    ]
+    commit_appeal(
         appeal_id=appeal_id,
         submission_id=content_id,
         author_id=author_id or original["author_id"],
@@ -234,18 +281,9 @@ def appeal():
             "attribution":    original["attribution"],
             "final_label":    original["final_label"],
         },
+        evidence_items=evidence_items,
+        new_status="under_review",
     )
-    for att, blob in decoded_attachments:
-        insert_evidence(
-            evidence_id=str(uuid.uuid4()),
-            appeal_id=appeal_id,
-            filename=att["filename"],
-            content_type=att["content_type"],
-            captured_at=att["captured_at"],
-            description=att["description"],
-            data=blob,
-        )
-    update_decision_status(content_id, "under_review")
 
     return jsonify({
         "content_id": content_id,
