@@ -218,6 +218,71 @@ Three entries cover all three label classes (`high-confidence AI`, `high-confide
     - Blind Spot: 
         * Unable to classify highly structured human writing (like technical manuals or academic abstracts) correctly -> lacks the sentimant
 
+## Confidence scoring
+
+The two signals combine into a single `combined_score ∈ [0, 1]`:
+
+```
+combined_score = (stylo_score + llm_ai_score) / 2
+```
+
+The label is decided by a two-part gate over magnitude AND direction:
+
+| | rule | label |
+|---|---|---|
+| Strong-AI | `combined > 0.7` AND `stylo > 0.5` AND `llm_ai > 0.5` | `"high-confidence AI"` |
+| Strong-human | `combined < 0.3` AND `stylo < 0.5` AND `llm_ai < 0.5` | `"high-confidence human"` |
+| Anything else | one signal points the wrong way OR neither cleared the bar | `"uncertain"` |
+
+The magnitude gate (`combined > 0.7 / < 0.3`) does the heavy lifting; the per-signal `>0.5 / <0.5` directional check prevents one strong signal from carrying the call when the other points the wrong way (a `stylo=0.95 + llm=0.05` pair averages to 0.5 — never strong).
+
+**How the scores were validated:** `tests/test_combiner.py` covers every gate branch including strict-boundary cases (exactly 0.7, 0.5, 0.3 do NOT pass), the LLM-failure fallback, and the directional guardrail. Live samples are dumped in the Audit log section above:
+
+- AI paragraph → `stylo=0.68`, `llm=0.80`, `combined=0.74` → `high-confidence AI`
+- Ramen review (human) → `stylo=0.21`, `llm=0.10`, `combined=0.16` → `high-confidence human`
+- Lightly edited AI → `stylo=0.44`, `llm=0.20`, `combined=0.32` → `uncertain`
+
+Three distinct outcomes across three inputs that should land in three different label classes confirms the thresholds actually separate them. Full spec lives in [planning.md §1–2](planning.md); the implementation is `signals/combiner.py`.
+
+## Known limitations
+
+The system's worst failure mode is **highly structured human writing** — technical documentation, academic abstracts, AP-style journalism, translated text, or non-native English where simpler/uniform sentences are the norm. Both signals fail in the same direction and produce a confidently-wrong call.
+
+Why this is uniquely bad:
+
+- `burstiness_score` ↓ — uniform sentence length is the *house style* in formal/technical writing, not a tell of AI
+- `transition_density` ↑ — formal writing leans on connectors like "however," "moreover," "furthermore"
+- The Groq judge **also leans AI** because the voice is genuinely flat — the absence of sentiment isn't a bug in technical writing, it's the goal
+
+Stylometric pipeline votes AI, LLM judge votes AI, agreement gate fires → `"high-confidence AI"` on a perfectly human technical document. Worse than other failure modes because both signals AGREE on the wrong answer — there's nothing in the audit log to flag the disagreement, so a reviewer reading the trace would see two confident votes and rubber-stamp it.
+
+Mitigations considered but not built: a `content_type` hint at submission time so platforms hosting technical content can warn users their material may be misclassified, or an asymmetric weighting if real data shows a systematic direction of error. Two more edge cases (poetry with refrains; formal prose with em-dashes as a stylistic tic) are written up in [planning.md §5](planning.md).
+
+## Spec reflection
+
+The most significant divergence from `planning.md` was the **strong-AI / strong-human gating rule**.
+
+**What the spec said:** §1 defined a strict per-signal threshold:
+
+```
+strong_ai    = stylo_score > 0.7 AND llm_ai_score > 0.7  → "high-confidence AI"
+strong_human = stylo_score < 0.3 AND llm_ai_score < 0.3  → "high-confidence human"
+```
+
+§2 paraphrased this as *"equivalently: combined_score > 0.7 AND signals agreed strongly"* — but the two formulations aren't actually equivalent. They diverge exactly when one signal is just shy of the bar while the other is well past it.
+
+**What broke:** a real AI paragraph (the "Artificial intelligence represents a transformative paradigm shift…" sample) landed at `stylo=0.677` and `llm=0.80`. Both signals clearly point AI; `combined=0.74` is squarely in "leans AI" territory. But stylo missed the strict `>0.7` bar by 0.023, so the strict rule returned `"uncertain"`. The same near-miss kept happening whenever AI text didn't use literal em-dashes — `em_dash_density` is one of three equally-weighted essay features, so its absence (raw value 0.0, normalized 0.0) capped stylo at ~0.67 even when the other two features were screaming AI.
+
+**What I changed:** relaxed the gate to a two-part rule, magnitude + direction:
+
+```
+strong_ai = combined > 0.7 AND stylo > 0.5 AND llm_ai > 0.5
+```
+
+The combined-magnitude gate does the heavy lifting; the per-signal `>0.5 / <0.5` directional check preserves the original architectural protection ("never call high-confidence when one signal points the wrong way"). A `stylo=0.45 + llm=0.97` pair still fails — `combined=0.71` clears magnitude but stylo points human, so the directional check vetoes it. I also down-tuned `em_dash_density` weight from `1/3 → 0.15` because absence isn't strong evidence of human; only its *presence* is strong evidence of AI.
+
+**Why this counts as a real divergence, not just a fix:** the strict rule was a deliberate design choice in §1 ("we never call something high-confidence on the back of one strong signal alone"). Relaxing it admits that 0.7 was a chosen-without-data threshold and that a near-miss on a single signal shouldn't disqualify a clearly-aligned pair. I updated both `planning.md` §1 and §2 to remove the inconsistency rather than paper over it. The relaxed rule is enforced by 13 tests in `tests/test_combiner.py` — including explicit cases that would behave differently under the strict rule.
+
 ## Architecture
 
 ```
@@ -306,3 +371,23 @@ When system misclassifies human writer's word
 * Display == uncertain maybe with .54 confidence is AI
 * Creator would hit a button to appeal 
     - UI button for a "appeal classification" -> UI text for human to enter reasoning -> api call to backend with reasoning -> log reasoning and original label -> display "Under Review" in UI
+
+## AI Usage
+
+I used Claude Code as a pair-programming assistant throughout the build. Two instances worth documenting in detail — both cases where my judgment overrode what the model produced.
+
+### 1. Stylometric feature direction flipped against the spec
+
+**What I asked Claude to generate:** the full Signal 1 implementation (`signals/stylometric.py`) matching `planning.md` §1 — the three engines (essay / poetry / short-form), the per-feature monotonic bounds, the min-max normalization with the inverted variant for low-is-AI features.
+
+**What Claude produced:** a clean implementation matching the spec table exactly. `lowercase_start_ratio` was implemented as **inverted (low = AI)** because the spec said so — the reasoning in planning.md was "humans use proper case; AI mimics the 'lowercase aesthetic' voice."
+
+**What I overrode and why:** I pulled the Kaggle "Celebrity Tweets — Real vs AI-Generated" dataset and counted the actual lowercase-start ratios across the 35 deduped tweets. Result: humans = **10%**, AI = **67%**. The direction was **backwards** — the AI imitator over-applies the lowercase voice, while real celebrities (Billie Eilish, Tyler the Creator, Ariana Grande) mix cases naturally. I flipped the feature to *direct* (high = AI), tuned the bounds to `(0.10, 0.67)`, and added a calibration paragraph to `planning.md` §1 documenting the divergence. Takeaway: when an AI implements a spec without questioning it, surprising-but-empirically-true findings get coded the wrong way around. Catch at calibration time, not in production.
+
+### 2. Combiner gating rule relaxed against the spec
+
+**What I asked Claude to generate:** the combiner function per `planning.md` §1's strict per-signal gating rule (`stylo > 0.7 AND llm > 0.7 → "high-confidence AI"`).
+
+**What Claude produced:** a strict-rule combiner with all 12 spec-conformance tests passing — including the strict-boundary tie-breakers (exactly 0.7 fails because of strict `>`). It worked correctly to spec.
+
+**What I overrode and why:** during live testing, a clearly-AI paragraph hit `stylo=0.68 + llm=0.80 → combined=0.74` and got labeled `"uncertain"` because stylo missed the strict bar by 0.023. I noticed planning.md §2 paraphrased the rule as *"equivalently: combined_score > 0.7 AND signals agreed strongly"* — but the two formulations aren't actually equivalent. I asked Claude to walk me through the divergence and was offered two options: clarify the spec doc, or relax the rule. Claude initially leaned toward keeping the strict rule as the architectural protection; I overrode that because the directional check (`stylo > 0.5 AND llm > 0.5`) preserves the same one-strong-signal-can't-carry-it guarantee without punishing near-misses. Full story is written up in the [Spec reflection](#spec-reflection) section above. Took ~30 minutes of back-and-forth to get spec doc, code, and tests all consistent again.
