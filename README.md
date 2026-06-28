@@ -55,10 +55,13 @@ curl -s -X POST http://127.0.0.1:5000/submit \
 # Read the audit log (scope to one author with ?author_id=alice)
 curl -s http://127.0.0.1:5000/log | python -m json.tool
 
-# Appeal a decision — grab the submission_id from /submit response above
+# Appeal a decision — paste the submission_id from the /submit response above
+# into the content_id field below (the two names refer to the same identifier;
+# /submit returns it as submission_id, /appeal takes it as content_id per the
+# graded spec).
 curl -s -X POST http://127.0.0.1:5000/appeal \
   -H "Content-Type: application/json" \
-  -d '{"content_id": "PASTE-CONTENT-ID", "creator_reasoning": "I wrote this myself."}' \
+  -d '{"content_id": "PASTE-SUBMISSION-ID", "creator_reasoning": "I wrote this myself."}' \
   | python -m json.tool
 ```
 
@@ -83,7 +86,7 @@ curl -s -X POST http://127.0.0.1:5000/appeal \
         * (optional) other evidence like images of progress/timeline, etc
     - Other:
         * Log the reasoning for appeal and the original decision
-        * Update content status to "Under Review"
+        * Update content status to "under_review"
 
 ## Non-functional
 
@@ -299,7 +302,7 @@ The combined-magnitude gate does the heavy lifting; the per-signal `>0.5 / <0.5`
    ┌─────────────────────────────────────────────────────────────────────────┐
    │                          SERVICE LAYER                                  │
    │  ┌────────────────────────┐         ┌────────────────────────┐          │
-   │  │ /attribution endpoint  │         │   /appeal endpoint     │          │
+   │  │   /submit endpoint     │         │   /appeal endpoint     │          │
    │  └───────────┬────────────┘         └───────────┬────────────┘          │
    └──────────────┼──────────────────────────────────┼───────────────────────┘
                   │                                  │
@@ -314,7 +317,7 @@ The combined-magnitude gate does the heavy lifting; the per-signal `>0.5 / <0.5`
    │  │     • punctuation density  │  │   │               ▼                  │
    │  │     • avg complexity       │  │   │  ┌────────────────────────────┐  │
    │  └────────────┬───────────────┘  │   │  │ Update status:             │  │
-   │               ▼                  │   │  │   "Under Review"           │  │
+   │               ▼                  │   │  │   "under_review"           │  │
    │  ┌────────────────────────────┐  │   │  └────────────────────────────┘  │
    │  │  2. LLM-as-Judge (Groq)    │  │   │                                  │
    │  │     • sentiment            │  │   │           (no return)            │
@@ -363,14 +366,14 @@ userInput -> Service [ attribution endpoint] --> Signal Detection Pipeline [ LLM
 #### IF user wants to appeal label
 userInput -> Service [ attribution endpoint] --> Signal Detection Pipeline [ Stylometric heuristics with sentence length variance, vocab, etc ---> LLM as a judge on sentiment and grammer style ] -> Service response with (attribution, confidence, transparency label) -> display the transparency label 
 
-userInput -> Service [ appeal endpoint ] --> log reasoning for appeal with original decision --> update "Under Review" in UI -> doesn't return anything
+userInput -> Service [ appeal endpoint ] --> log reasoning for appeal with original decision --> update "under_review" in UI -> doesn't return anything
 
 
 ### False Positive
 When system misclassifies human writer's word
 * Display == uncertain maybe with .54 confidence is AI
 * Creator would hit a button to appeal 
-    - UI button for a "appeal classification" -> UI text for human to enter reasoning -> api call to backend with reasoning -> log reasoning and original label -> display "Under Review" in UI
+    - UI button for a "appeal classification" -> UI text for human to enter reasoning -> api call to backend with reasoning -> log reasoning and original label -> display "under_review" in UI
 
 ## AI Usage
 

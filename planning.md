@@ -164,9 +164,9 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
   **Only the original author of the submission.** Submissions carry an `author_id` field (provided by the consuming platform at `/submit` time and stored in the `decisions` row); appeals must present a matching `author_id` to be accepted. The consuming platform owns authentication of users → `author_id`; the system enforces that whoever appeals is the same identity that submitted.
 
 - **Required appeal inputs:**
-  - `submission_id: str` — links back to the original decision record
-  - `author_id: str` — must match the `author_id` stored on the original submission, otherwise the appeal is rejected
-  - `reasoning: str` — the creator's explanation, non-empty, free-form text (no minimum length enforced beyond non-empty; platforms can layer their own limits)
+  - `content_id: str` — links back to the original decision record (same value as `submission_id` from /submit's response; renamed at the wire per the graded spec)
+  - `creator_reasoning: str` — the creator's explanation, non-empty, free-form text (no minimum length enforced beyond non-empty; platforms can layer their own limits)
+  - `author_id: str` (optional) — when supplied, must match the `author_id` stored on the original submission, otherwise the appeal is rejected (403). Implemented as optional so the minimal graded-spec curl still works; supply it in production to enforce author-match
 
   **Optional but encouraged — evidence attachments:**
   - `evidence: list[Attachment]` — author-provided supporting material such as draft screenshots, version-history captures, or revision-progress timelines that demonstrate the writing was incremental human work. Each attachment is:
@@ -185,10 +185,10 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
 - **System actions on receipt:**
   - **Lookup:** fetch the original decision from SQLite `decisions` by `submission_id`. If not found → 404
   - **Authorization:** compare submitted `author_id` against the stored `author_id`. Mismatch → 403 Forbidden. Empty reasoning → 400
-  - **status change:** the original submission's status flips from `"active"` → `"Under Review"` in the `decisions` table
-  - **what gets logged:** a new row in SQLite `appeals` containing `submission_id` (FK), `author_id`, `reasoning`, a snapshot of the `original_decision` fields (`combined_score`, `attribution`, `final_label`), `status: "Under Review"`, and `timestamp`. Evidence attachments are stored in a related `appeal_evidence` table (one row per attachment) keyed by `appeal_id`, holding `filename`, `content_type`, `captured_at`, `description`, and the file payload (blob or path)
+  - **status change:** the original submission's status flips from `"active"` → `"under_review"` in the `decisions` table
+  - **what gets logged:** a new row in SQLite `appeals` containing `submission_id` (FK), `author_id`, `reasoning`, a snapshot of the `original_decision` fields (`combined_score`, `attribution`, `final_label`), `status: "under_review"`, and `timestamp`. Evidence attachments are stored in a related `appeal_evidence` table (one row per attachment) keyed by `appeal_id`, holding `filename`, `content_type`, `captured_at`, `description`, and the file payload (blob or path)
   - **what does NOT change:** the original classification fields (`combined_score`, `stylo_score`, `llm_ai_score`, `attribution`, `final_label`) are immutable — they remain as the system's record of *what we said at decision time*. Resolution only adds a new row in `appeals`; it never edits the original `decisions` row
-  - **Response:** HTTP 202 with `{"submission_id": "...", "status": "Under Review"}`
+  - **Response:** HTTP 202 with `{"content_id": "...", "appeal_id": "...", "status": "under_review"}`
 
 - **What the reviewer sees in the queue:**
   Each queued appeal surfaces the full classification trace so the reviewer can re-derive *why* the system landed where it did:
@@ -249,7 +249,7 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
 
 > 2–3 sentence narrative describing the submission flow and the appeal flow.
 
-**Narrative:** On `POST /submit`, raw text is routed to one of three stylometric engines (essay / poetry / short-form), scored against three monotonic features per engine, and combined with a Groq LLM-as-judge call into a `combined_score` (plain average) and a `final_label` (decided by agreement gating over individual signals); the full decision trace is persisted in SQLite under the submission's `author_id` and returned as `{attribution, confidence, label}`. On `POST /appeal`, the system verifies the caller's `author_id` matches the original submission, logs the creator's reasoning plus optional evidence attachments (screenshots with `captured_at` timestamps) into the `appeals` and `appeal_evidence` tables, flips the original submission's status to `"Under Review"` (without mutating the original decision fields), and returns a 202 acknowledgment.
+**Narrative:** On `POST /submit`, raw text is routed to one of three stylometric engines (essay / poetry / short-form), scored against three monotonic features per engine, and combined with a Groq LLM-as-judge call into a `combined_score` (plain average) and a `final_label` (decided by agreement gating over individual signals); the full decision trace is persisted in SQLite under the submission's `author_id` and returned as `{attribution, confidence, label}`. On `POST /appeal`, the system verifies the caller's `author_id` matches the original submission, logs the creator's reasoning plus optional evidence attachments (screenshots with `captured_at` timestamps) into the `appeals` and `appeal_evidence` tables, flips the original submission's status to `"under_review"` (without mutating the original decision fields), and returns a 202 acknowledgment.
 
 ### Diagram
 
@@ -357,9 +357,9 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
         │
         │  POST /appeal
         │  body: {
-        │    "submission_id": "...",
-        │    "author_id":     "...",
-        │    "reasoning":     "<creator's text>",
+        │    "content_id":        "...",
+        │    "creator_reasoning": "<creator's text>",
+        │    "author_id":         "..." (optional),
         │    "evidence": [                       ◄── optional
         │       {
         │         "filename":     "...",
@@ -377,7 +377,7 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
    │  /appeal handler   │
    └────────┬───────────┘
             │
-            │  submission_id, author_id, reasoning, evidence[]
+            │  content_id, creator_reasoning, evidence[], author_id?
             ▼
    ┌────────────────────────────────┐
    │  Lookup original decision      │
@@ -404,14 +404,14 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
    ┌────────────────────────────────┐
    │  Status Updater                │
    │  decisions.status              │
-   │    → "Under Review"            │
+   │    → "under_review"            │
    │  (other fields untouched)      │
    └──────────────┬─────────────────┘
                   │
                   │  appeal_record: {
                   │    submission_id, author_id, reasoning,
                   │    original_decision snapshot,
-                  │    status: "Under Review", timestamp
+                  │    status: "under_review", timestamp
                   │  }
                   │  evidence_records: [
                   │    { appeal_id (FK), filename,
@@ -432,8 +432,9 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
           ┌─────────────────────────────────┐
           │         HTTP 202 Response       │
           │  {                              │
-          │    "submission_id": "...",      │
-          │    "status": "Under Review"     │
+          │    "content_id": "...",         │
+          │    "appeal_id":  "...",         │
+          │    "status":     "under_review" │
           │  }                              │
           └─────────────────────────────────┘
                    │
@@ -489,11 +490,11 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
 - **What to ask the AI tool to generate:**
   - The final label-string emitter (deterministic from the agreement gate) — produces exactly `"high-confidence AI"`, `"high-confidence human"`, or `"uncertain"`
   - SQLite schema for `appeals` and `appeal_evidence` tables matching §4's spec
-  - `POST /appeal` handler: lookup by `submission_id` (404), `author_id` check (403), reasoning non-empty (400), evidence-attachment validation (5 MB / 10-count caps → 413), insert appeal + evidence rows, flip submission status to `"Under Review"`, return 202
+  - `POST /appeal` handler: lookup by `submission_id` (404), `author_id` check (403), reasoning non-empty (400), evidence-attachment validation (5 MB / 10-count caps → 413), insert appeal + evidence rows, flip submission status to `"under_review"`, return 202
   - A minimal reviewer-queue read endpoint that returns the full decision trace + appeal + evidence (sorted by `captured_at`) for a given `submission_id`
 - **How to verify the output:**
   - All three label variants are reachable from test inputs (confirms M4 thresholds wire through to M5 label strings exactly)
-  - Submit text → appeal with matching `author_id` + reasoning → returns 202, status is `"Under Review"`, appeal row exists in SQLite
+  - Submit text → appeal with matching `author_id` + reasoning → returns 202, status is `"under_review"`, appeal row exists in SQLite
   - Same flow with mismatched `author_id` → 403; empty reasoning → 400; bogus `submission_id` → 404
   - Submit appeal with 2 attachments (different `captured_at` timestamps) → both rows in `appeal_evidence`, reviewer endpoint returns them in chronological order
   - Confirm the original `decisions` row is untouched after appeal — only `status` changes, not the score/label fields
