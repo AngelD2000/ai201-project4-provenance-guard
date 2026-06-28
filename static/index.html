@@ -436,9 +436,7 @@ function renderLog(data) {
     const cls = labelClass(e.attribution);
     const ts = new Date(e.timestamp).toLocaleString();
     const statusCls = e.status === "under_review" ? "status under_review" : "status";
-    // Only AI verdicts are appealable — a writer wouldn't contest a "human" or
-    // "uncertain" call, only one that explicitly flags them as AI.
-    const canAppeal = e.status === "active" && e.attribution === "AI";
+    const canAppeal = e.status === "active";
     div.innerHTML = `
       <div class="entry-head">
         <span class="ts">${ts}</span>
