@@ -444,6 +444,88 @@ The label returned by the `/submit` endpoint is a short canonical string. Consum
               └──────────┘
 ```
 
+#### Flow 3 — Audit log read (`GET /log`)
+
+```
+   ┌──────────┐
+   │  Client  │
+   └────┬─────┘
+        │
+        │  GET /log[?author_id=<id>&limit=<n>]
+        ▼
+   ┌────────────────────┐
+   │  Service Layer     │
+   │  /log handler      │
+   └────────┬───────────┘
+            │
+            │  parse query params:
+            │   • author_id (optional, scopes per author)
+            │   • limit (default 50, clamped to [1, 200])
+            ▼
+   ┌────────────────────────────────┐
+   │  Read decisions table          │
+   │  SELECT * FROM decisions       │
+   │  [WHERE author_id = ?]         │
+   │  ORDER BY created_at DESC      │
+   │  LIMIT ?                       │
+   └──────────────┬─────────────────┘
+                  │
+                  │  rows: list[decision]
+                  ▼
+   ┌────────────────────────────────┐
+   │  Join latest appeal per row    │
+   │  For each decision row:        │
+   │    SELECT * FROM appeals       │
+   │    WHERE submission_id = ?     │
+   │    ORDER BY created_at DESC    │
+   │    LIMIT 1                     │
+   └──────────────┬─────────────────┘
+                  │
+                  │  rows: list[decision + maybe appeal]
+                  ▼
+   ┌────────────────────────────────┐
+   │  Shape transformation          │
+   │  • rename: submission_id →     │
+   │    content_id, author_id →     │
+   │    creator_id                  │
+   │  • surface appeal_reasoning    │
+   │    (null when not appealed)    │
+   │  • bool-cast signals_agreed    │
+   │  • drop raw_text from response │
+   └──────────────┬─────────────────┘
+                  │
+                  ▼
+          ┌─────────────────────────────────┐
+          │         HTTP 200 Response       │
+          │  {                              │
+          │    "entries": [                 │
+          │      {                          │
+          │        "content_id":     "...", │
+          │        "creator_id":     "...", │
+          │        "timestamp":      "...", │
+          │        "stylo_score":     0–1,  │
+          │        "llm_score":      0–1|null,│
+          │        "confidence":      0–1,  │
+          │        "attribution":   "AI|..."│
+          │        "label":         "...",  │
+          │        "status":      "active|  │
+          │                 under_review",  │
+          │        "appeal_reasoning":      │
+          │                  "..."|null,    │
+          │        ...                      │
+          │      }, ...                     │
+          │    ]                            │
+          │  }                              │
+          └─────────────────────────────────┘
+                   │
+                   ▼
+              ┌──────────┐
+              │  Client  │
+              └──────────┘
+```
+
+Read-only, never mutates state — the audit log is the system's record of *what we said at decision time*, and it is preserved across appeals (only `status` flips on the decision row).
+
 ---
 
 ## AI Tool Plan

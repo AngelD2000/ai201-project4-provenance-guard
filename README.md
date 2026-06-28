@@ -293,68 +293,59 @@ The combined-magnitude gate does the heavy lifting; the per-signal `>0.5 / <0.5`
 │                          PROVENANCE GUARD SYSTEM                            │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-   ┌──────────┐
-   │   USER   │
-   └────┬─────┘
-        │
-        │ submits text
-        ▼
-   ┌─────────────────────────────────────────────────────────────────────────┐
-   │                          SERVICE LAYER                                  │
-   │  ┌────────────────────────┐         ┌────────────────────────┐          │
-   │  │   /submit endpoint     │         │   /appeal endpoint     │          │
-   │  └───────────┬────────────┘         └───────────┬────────────┘          │
-   └──────────────┼──────────────────────────────────┼───────────────────────┘
-                  │                                  │
-                  ▼                                  ▼
-   ┌──────────────────────────────────┐   ┌──────────────────────────────────┐
-   │   SIGNAL DETECTION PIPELINE      │   │       APPEAL HANDLER             │
-   │                                  │   │                                  │
-   │  ┌────────────────────────────┐  │   │  ┌────────────────────────────┐  │
-   │  │  1. Stylometric Heuristics │  │   │  │ Log creator reasoning      │  │
-   │  │     • sentence len variance│  │   │  │ + original decision        │  │
-   │  │     • type-token ratio     │  │   │  └────────────┬───────────────┘  │
-   │  │     • punctuation density  │  │   │               ▼                  │
-   │  │     • avg complexity       │  │   │  ┌────────────────────────────┐  │
-   │  └────────────┬───────────────┘  │   │  │ Update status:             │  │
-   │               ▼                  │   │  │   "under_review"           │  │
-   │  ┌────────────────────────────┐  │   │  └────────────────────────────┘  │
-   │  │  2. LLM-as-Judge (Groq)    │  │   │                                  │
-   │  │     • sentiment            │  │   │           (no return)            │
-   │  │     • grammar / style      │  │   └──────────────────────────────────┘
-   │  └────────────┬───────────────┘  │
-   │               ▼                  │
-   │  ┌────────────────────────────┐  │
-   │  │  Aggregate → Confidence    │  │
-   │  └────────────┬───────────────┘  │
-   └───────────────┼──────────────────┘
-                   ▼
-   ┌─────────────────────────────────────────────┐
-   │              RESPONSE                       │
-   │  {                                          │
-   │    "attribution": "AI | human | ...",       │
-   │    "confidence":  0.0 – 1.0,                │
-   │    "label":       "high-confidence AI"      │
-   │                 | "high-confidence human"   │
-   │                 | "uncertain"               │
-   │  }                                          │
-   └──────────────────┬──────────────────────────┘
-                      ▼
-              ┌───────────────┐
-              │ Transparency  │
-              │ label shown   │
-              │   in UI       │
-              └───────┬───────┘
-                      │
-            ┌─────────┴──────────┐
-            │ Disagrees?         │
-            │ Hit "Appeal" btn ──┼──► back to /appeal endpoint
-            └────────────────────┘
+                                  ┌──────────┐
+                                  │   USER   │
+                                  └────┬─────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │ POST /submit           │ GET /log               │ POST /appeal
+              ▼                        ▼                        ▼
+   ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
+   │  /submit endpoint    │  │   /log endpoint      │  │   /appeal endpoint   │
+   └──────────┬───────────┘  └──────────┬───────────┘  └──────────┬───────────┘
+              │                         │                         │
+              ▼                         │                         ▼
+   ┌──────────────────────────┐         │              ┌──────────────────────┐
+   │ SIGNAL PIPELINE          │         │              │   APPEAL HANDLER     │
+   │  1. Stylometric (3 eng.) │         │              │  • log reasoning     │
+   │  2. LLM judge (Groq)     │         │              │    + original snap   │
+   │  3. Combiner →           │         │              │  • flip decision    │
+   │     {attribution, conf,  │         │              │    status → review   │
+   │      label}              │         │              │                      │
+   └──────────┬───────────────┘         │              └──────────┬───────────┘
+              │ write                   │ read                    │ write
+              ▼                         ▼                         ▼
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │                       AUDIT LOG (SQLite)                              │
+   │  tables: decisions · appeals · appeal_evidence                        │
+   │  /submit appends a row; /appeal flips status + adds appeal/evidence;  │
+   │  /log scans newest-first, joins latest appeal, scoped by author_id    │
+   └────────────────────────────────┬──────────────────────────────────────┘
+                                    │
+                                    ▼
+                       ┌──────────────────────────┐
+                       │      JSON RESPONSE       │
+                       │                          │
+                       │  /submit → {submission_  │
+                       │    id, attribution,      │
+                       │    confidence, label}    │
+                       │                          │
+                       │  /log → {entries:[       │
+                       │    {content_id, scores,  │
+                       │     attribution, label,  │
+                       │     status, appeal_      │
+                       │     reasoning, ...}]}    │
+                       │                          │
+                       │  /appeal → {content_id,  │
+                       │    appeal_id,            │
+                       │    status:"under_review"}│
+                       └──────────────────────────┘
 
-   ┌─────────────────────────────────────────────────────────────────────────┐
-   │ NON-FUNCTIONAL: /submit rate-limited to 10/min + 100/day per IP         │
-   │                 (in-memory; see "Rate limits" section for rationale)     │
-   └─────────────────────────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ NON-FUNCTIONAL: /submit rate-limited to 10/min + 100/day per IP         │
+  │                 (in-memory; see "Rate limits" section for rationale)    │
+  │                 Body size capped at 75 MB; /submit text capped at 100KB │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Example
